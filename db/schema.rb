@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_08_24_151931) do
+ActiveRecord::Schema[8.0].define(version: 2026_10_06_000000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -175,6 +175,9 @@ ActiveRecord::Schema[8.0].define(version: 2026_08_24_151931) do
     t.datetime "backend_approved_at"
     t.jsonb "pending_reviewers", default: []
     t.jsonb "pending_teams", default: []
+    t.integer "additions"
+    t.integer "deletions"
+    t.integer "changed_files"
     t.index ["awaiting_author_changes"], name: "index_pull_requests_on_awaiting_author_changes"
     t.index ["backend_approval_status"], name: "index_pull_requests_on_backend_approval_status"
     t.index ["github_id"], name: "index_pull_requests_on_github_id", unique: true

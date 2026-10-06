@@ -121,6 +121,64 @@ class GithubService
     raise e
   end
 
+  def pull_request_diff_stats(state: "OPEN")
+    # Bulk-fetch additions/deletions/changedFiles for every open PR in a
+    # couple of paginated GraphQL calls. The REST list endpoint used by
+    # all_pull_requests doesn't return these fields at all — only the
+    # single-PR REST endpoint does, which would mean one extra REST call
+    # per PR per scrape. GraphQL's list query returns them for free, so a
+    # repo with ~150 open PRs costs 2 GraphQL calls instead of 150 REST ones.
+    stats = {}
+    cursor = nil
+
+    loop do
+      query = <<~GRAPHQL
+        query {
+          repository(owner: "#{@owner}", name: "#{@repo}") {
+            pullRequests(states: #{state}, first: 100#{cursor ? ", after: \"#{cursor}\"" : ""}) {
+              nodes {
+                number
+                additions
+                deletions
+                changedFiles
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+            }
+          }
+        }
+      GRAPHQL
+
+      result = @client.post("/graphql", { query: query }.to_json)
+      prs_connection = result&.dig(:data, :repository, :pullRequests)
+
+      unless prs_connection
+        Rails.logger.error "GraphQL query returned unexpected structure: #{result.inspect}"
+        break
+      end
+
+      prs_connection[:nodes].each do |node|
+        stats[node[:number]] = {
+          additions: node[:additions],
+          deletions: node[:deletions],
+          changed_files: node[:changedFiles]
+        }
+      end
+
+      page_info = prs_connection[:pageInfo]
+      break unless page_info[:hasNextPage]
+
+      cursor = page_info[:endCursor]
+    end
+
+    stats
+  rescue => e
+    Rails.logger.error "GraphQL Error fetching diff stats: #{e.message}"
+    stats
+  end
+
   def pull_request_comments(pr_number)
     # Note: In GitHub API, PR comments (issue comments) are different from review comments
     # This fetches issue comments (regular comments on the PR thread)

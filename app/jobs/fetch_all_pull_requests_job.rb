@@ -30,6 +30,11 @@ class FetchAllPullRequestsJob < ApplicationJob
     master_prs = open_prs
     Rails.logger.info "[FetchAllPullRequestsJob] Processing #{master_prs.count} open PRs (all base branches)"
 
+    # Bulk-fetch diff stats (additions/deletions/changed_files) for every open
+    # PR in a couple of GraphQL calls, keyed by PR number. Cheaper than a
+    # REST call per PR (see GithubService#pull_request_diff_stats).
+    diff_stats_by_number = github_service.pull_request_diff_stats
+
     # Drop the second reference; master_prs is the same array now that nothing
     # is filtered out, so this frees no memory on its own — the GC pass below
     # is still worth keeping before the per-PR work begins.
@@ -40,7 +45,7 @@ class FetchAllPullRequestsJob < ApplicationJob
     # Only update basic PR info and state changes
     if lite_mode
       Rails.logger.info "[FetchAllPullRequestsJob] Running in LITE MODE - skipping CI checks and reviews"
-      process_prs_lite(master_prs, repository_name, repository_owner, github_service)
+      process_prs_lite(master_prs, repository_name, repository_owner, github_service, diff_stats_by_number)
     else
       # Create services once and reuse to avoid memory allocation per PR
       shared_github_service = GithubService.new(owner: repository_owner, repo: repository_name)
@@ -67,6 +72,8 @@ class FetchAllPullRequestsJob < ApplicationJob
             pr.repository_owner = repository_owner || ENV["GITHUB_OWNER"]
           end
 
+          diff_stats = diff_stats_by_number[pr_data.number] || {}
+
           pr.update!(
             github_id: pr_data.id,
             number: pr_data.number,
@@ -86,7 +93,10 @@ class FetchAllPullRequestsJob < ApplicationJob
             # means the PR is still blocked on review even when it already has
             # approvals and green CI.
             pending_reviewers: (pr_data.requested_reviewers || []).map(&:login),
-            pending_teams: (pr_data.requested_teams || []).map(&:slug)
+            pending_teams: (pr_data.requested_teams || []).map(&:slug),
+            additions: diff_stats[:additions],
+            deletions: diff_stats[:deletions],
+            changed_files: diff_stats[:changed_files]
           )
 
           # Only fetch checks if PR changed (new commits) - saves memory & API calls
@@ -177,11 +187,12 @@ class FetchAllPullRequestsJob < ApplicationJob
   # LITE MODE: Minimal memory footprint for 512MB Render limit
   # Only updates basic PR info, state changes, and merged/closed detection
   # Skips: CI checks, reviews fetching, approval status recalculation
-  def process_prs_lite(master_prs, repository_name, repository_owner, github_service)
+  def process_prs_lite(master_prs, repository_name, repository_owner, github_service, diff_stats_by_number)
     processed = 0
     master_prs.each_slice(5) do |batch|
       batch.each do |pr_data|
         pr = PullRequest.find_or_initialize_by(github_id: pr_data.id)
+        diff_stats = diff_stats_by_number[pr_data.number] || {}
 
         # New commits invalidate every stored check: they belong to the previous
         # head. Lite mode doesn't refetch checks, and Step 3 only reaches roughly
@@ -214,7 +225,10 @@ class FetchAllPullRequestsJob < ApplicationJob
           # See note above: free on the list payload, and required to tell a
           # merge-ready PR from one still awaiting a codeowner review.
           pending_reviewers: (pr_data.requested_reviewers || []).map(&:login),
-          pending_teams: (pr_data.requested_teams || []).map(&:slug)
+          pending_teams: (pr_data.requested_teams || []).map(&:slug),
+          additions: diff_stats[:additions],
+          deletions: diff_stats[:deletions],
+          changed_files: diff_stats[:changed_files]
         )
 
         if head_changed
